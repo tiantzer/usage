@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sqlite3
+import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,6 +18,15 @@ logger = logging.getLogger(__name__)
 
 SESSIONS_DIR = Path(os.path.expanduser("~/.codex/sessions"))
 STATE_DB = Path(os.path.expanduser("~/.codex/state_5.sqlite"))
+
+# Stable, launchd-safe locations to find the codex binary. The bundled app path
+# is preferred because the menubar runs under launchd with a minimal PATH that
+# does not include nvm's shims.
+CODEX_BINARY_CANDIDATES = (
+    "/Applications/Codex.app/Contents/Resources/codex",
+    os.path.expanduser("~/.nvm/versions/node/v22.14.0/bin/codex"),
+    "codex",
+)
 
 
 @dataclass(slots=True)
@@ -62,6 +74,130 @@ def load_rate_limits() -> CodexRateLimits | None:
         if rate_limits is not None:
             return rate_limits
     return None
+
+
+def load_rate_limits_best(timeout: float = 8.0) -> CodexRateLimits | None:
+    """Return live rate limits from the Codex app-server, falling back to the
+    (possibly stale) snapshot parsed from session rollout files."""
+    live = load_rate_limits_live(timeout=timeout)
+    if live is not None:
+        return live
+    return load_rate_limits()
+
+
+def load_rate_limits_live(timeout: float = 8.0) -> CodexRateLimits | None:
+    """Query the Codex app-server over JSON-RPC for the current account rate
+    limits. This is the same source the Codex TUI uses, so it reflects real
+    usage immediately instead of lagging behind sparse rollout checkpoints."""
+    binary = _codex_binary()
+    if binary is None:
+        return None
+    try:
+        proc = subprocess.Popen(
+            [binary, "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        logger.warning("failed to spawn codex app-server: %s", exc)
+        return None
+
+    captured: dict[str, Any] = {}
+
+    def _reader() -> None:
+        stdout = proc.stdout
+        if stdout is None:
+            return
+        for line in stdout:
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("id") == 2:
+                captured["result"] = _as_dict(msg.get("result"))
+                break
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+
+    try:
+        stdin = proc.stdin
+        if stdin is None:
+            return None
+        for message in (
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {"clientInfo": {"name": "usag", "version": "0.1.0"}},
+            },
+            {"method": "initialized"},
+            {"id": 2, "method": "account/rateLimits/read", "params": {}},
+        ):
+            stdin.write(json.dumps(message) + "\n")
+            stdin.flush()
+    except (OSError, ValueError) as exc:
+        logger.warning("failed to talk to codex app-server: %s", exc)
+        _terminate(proc)
+        return None
+
+    reader.join(timeout)
+    _terminate(proc)
+
+    result = captured.get("result")
+    if result is None:
+        return None
+    return _parse_live_rate_limits(result)
+
+
+def _codex_binary() -> str | None:
+    for candidate in CODEX_BINARY_CANDIDATES:
+        if os.sep in candidate:
+            if os.path.exists(candidate):
+                return candidate
+        else:
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+    return None
+
+
+def _terminate(proc: subprocess.Popen[str]) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def _parse_live_rate_limits(result: dict[str, Any]) -> CodexRateLimits | None:
+    rate_limits = _as_dict(result.get("rateLimits"))
+    if not rate_limits:
+        return None
+    primary = _as_dict(rate_limits.get("primary"))
+    secondary = _as_dict(rate_limits.get("secondary"))
+    five_pct = _as_optional_float(primary.get("usedPercent"))
+    five_reset = _as_optional_float(primary.get("resetsAt"))
+    seven_pct = _as_optional_float(secondary.get("usedPercent"))
+    seven_reset = _as_optional_float(secondary.get("resetsAt"))
+    if five_pct is None and seven_pct is None:
+        return None
+    # Unlike the rollout-file path, the live value is authoritative even when a
+    # window is at its reset boundary, so we never force it to zero here.
+    return CodexRateLimits(
+        five_hour_pct=five_pct,
+        five_hour_resets_at=five_reset,
+        seven_day_pct=seven_pct,
+        seven_day_resets_at=seven_reset,
+        updated_at=datetime.now(UTC).isoformat(),
+    )
 
 
 def _load_thread_models() -> dict[str, str]:

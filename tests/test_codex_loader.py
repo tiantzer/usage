@@ -108,6 +108,60 @@ def test_load_rate_limits_returns_none_when_sessions_dir_missing(
     assert codex_loader.load_rate_limits() is None
 
 
+def test_parse_live_rate_limits_maps_app_server_fields() -> None:
+    result = {
+        "rateLimits": {
+            "limitId": "codex",
+            "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1780675349},
+            "secondary": {"usedPercent": 68, "windowDurationMins": 10080, "resetsAt": 1781137809},
+            "planType": "plus",
+        }
+    }
+
+    parsed = codex_loader._parse_live_rate_limits(result)
+
+    assert parsed is not None
+    assert parsed.five_hour_pct == 100.0
+    assert parsed.five_hour_resets_at == 1780675349
+    assert parsed.seven_day_pct == 68.0
+    assert parsed.seven_day_resets_at == 1781137809
+
+
+def test_parse_live_rate_limits_returns_none_without_rate_limits() -> None:
+    assert codex_loader._parse_live_rate_limits({}) is None
+    assert codex_loader._parse_live_rate_limits({"rateLimits": {}}) is None
+
+
+def test_load_rate_limits_best_prefers_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = codex_loader.CodexRateLimits(
+        five_hour_pct=100.0,
+        five_hour_resets_at=1.0,
+        seven_day_pct=68.0,
+        seven_day_resets_at=2.0,
+    )
+    monkeypatch.setattr(codex_loader, "load_rate_limits_live", lambda timeout=8.0: sentinel)
+    monkeypatch.setattr(
+        codex_loader,
+        "load_rate_limits",
+        lambda: pytest.fail("should not fall back when live data is available"),
+    )
+
+    assert codex_loader.load_rate_limits_best() is sentinel
+
+
+def test_load_rate_limits_best_falls_back_to_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    fallback = codex_loader.CodexRateLimits(
+        five_hour_pct=25.0,
+        five_hour_resets_at=1.0,
+        seven_day_pct=70.0,
+        seven_day_resets_at=2.0,
+    )
+    monkeypatch.setattr(codex_loader, "load_rate_limits_live", lambda timeout=8.0: None)
+    monkeypatch.setattr(codex_loader, "load_rate_limits", lambda: fallback)
+
+    assert codex_loader.load_rate_limits_best() is fallback
+
+
 def test_load_rate_limits_reads_primary_and_secondary_windows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

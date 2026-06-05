@@ -605,6 +605,10 @@ class AppDelegate(NSObject):
         except Exception as exc:
             codex_5h_pct = None
             state = _error_state(type(exc).__name__, self.mock)
+        finally:
+            # Always clear the guard from the worker thread so a failed or
+            # undelivered main-thread callback can never latch the button dead.
+            self._refresh_in_flight = False
 
         result = {"state": state, "codex_5h_pct": codex_5h_pct}
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
@@ -682,7 +686,7 @@ class AppDelegate(NSObject):
             return rows, 12
 
         try:
-            rate_limits = codex_loader.load_rate_limits()
+            rate_limits = codex_loader.load_rate_limits_best()
         except Exception:
             rate_limits = None
 
