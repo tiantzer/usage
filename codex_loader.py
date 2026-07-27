@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -169,10 +170,8 @@ def _terminate(proc: subprocess.Popen[str]) -> None:
         proc.terminate()
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        try:
+        with suppress(OSError):
             proc.kill()
-        except OSError:
-            pass
     except OSError:
         pass
 

@@ -59,7 +59,7 @@ PADDING = 14.0
 TRACK_HEIGHT = 8.0
 CARD_HEIGHT = 184.0
 FOOTER_HEIGHT = 152.0
-CARD_RADIUS = 18.0
+CARD_RADIUS = 8.0
 CARD_HEADER_TOP = 22.0
 CARD_ROW_TOP = 66.0
 CARD_ROW_GAP = 64.0
@@ -70,7 +70,7 @@ FOOTER_LINE_GAP = 18.0
 BUTTON_TOP_GAP = 18.0
 BUTTON_HEIGHT = 32.0
 CLAUDE_COLOR = (244 / 255, 145 / 255, 100 / 255)
-CODEX_COLOR = (88 / 255, 214 / 255, 230 / 255)
+CODEX_COLOR = (70 / 255, 181 / 255, 198 / 255)
 
 
 def _resolve_resource(name: str) -> str:
@@ -276,13 +276,19 @@ class ActionButton(NSButton):
 
     def drawRect_(self, dirty_rect: Any) -> None:
         bounds = self.bounds()
-        radius = 10.0
+        radius = 8.0
         path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bounds, radius, radius)
         border = _button_border_color(self, self.is_primary)
         border.setStroke()
 
-        if self.is_primary and self.accent_color is not None:
-            _button_gradient(self.accent_color).drawInBezierPath_angle_(path, 90.0)
+        if not self.isEnabled():
+            _disabled_button_fill_color(self).setFill()
+            path.fill()
+        elif self.is_primary and self.accent_color is not None:
+            if self.isHighlighted():
+                _button_pressed_gradient(self.accent_color).drawInBezierPath_angle_(path, 90.0)
+            else:
+                _button_gradient(self.accent_color).drawInBezierPath_angle_(path, 90.0)
         else:
             _secondary_button_fill_color(self).setFill()
             path.fill()
@@ -502,6 +508,13 @@ class PopoverContentView(NSView):
         self.today_label.setTextColor_(NSColor.labelColor())
         self.setNeedsDisplay_(True)
 
+    def setRefreshing_(self, refreshing: bool) -> None:
+        self.refresh_button.setEnabled_(not refreshing)
+        self.refresh_button.setTitle_("更新中..." if refreshing else "立即更新")
+        self.refresh_button.setNeedsDisplay_(True)
+        if refreshing:
+            self.status_label.setStringValue_("狀態：正在更新...")
+
 
 class PopoverViewController(NSViewController):
     content_view = objc.ivar()
@@ -532,6 +545,7 @@ class AppDelegate(NSObject):
     latest_state = objc.ivar()
     codex_5h_pct = objc.ivar()
     _refresh_in_flight = objc.ivar()
+    refresh_started_at = objc.ivar()
 
     def initWithMock_interval_(self, mock: bool, interval: int) -> AppDelegate:
         self = objc.super(AppDelegate, self).init()
@@ -543,6 +557,7 @@ class AppDelegate(NSObject):
         self.codex_5h_pct = None
         self.latest_state = _empty_state()
         self._refresh_in_flight = False
+        self.refresh_started_at = 0.0
         return self
 
     def applicationDidFinishLaunching_(self, notification: Any) -> None:
@@ -551,7 +566,7 @@ class AppDelegate(NSObject):
             NSVariableStatusItemLength,
         )
         button = self.status_item.button()
-        button.setTitle_("🐾 ...")
+        button.setTitle_("Claude ...")
         button.setTarget_(self)
         button.setAction_("togglePopover:")
 
@@ -594,6 +609,8 @@ class AppDelegate(NSObject):
         if self._refresh_in_flight:
             return
         self._refresh_in_flight = True
+        self.refresh_started_at = time.monotonic()
+        self._set_refreshing(True)
         thread = threading.Thread(target=self._refresh_in_background, daemon=True)
         thread.start()
 
@@ -610,6 +627,10 @@ class AppDelegate(NSObject):
             # undelivered main-thread callback can never latch the button dead.
             self._refresh_in_flight = False
 
+        elapsed = time.monotonic() - float(self.refresh_started_at or 0.0)
+        if elapsed < 0.35:
+            time.sleep(0.35 - elapsed)
+
         result = {"state": state, "codex_5h_pct": codex_5h_pct}
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "_applyRefreshResult:",
@@ -624,7 +645,12 @@ class AppDelegate(NSObject):
         self.latest_state = state
         self.popover_controller.setState_(state)
         self.status_item.button().setTitle_(self._compose_title(state))
+        self._set_refreshing(False)
         self._refresh_in_flight = False
+
+    def _set_refreshing(self, refreshing: bool) -> None:
+        if self.popover_controller is not None:
+            self.popover_controller.content_view.setRefreshing_(refreshing)
 
     async def _fetch(self) -> PollOutcome:
         client = ClaudeUsageClient(mock=self.mock)
@@ -718,10 +744,10 @@ class AppDelegate(NSObject):
 
     def _compose_title(self, state: PopoverState) -> str:
         claude_text = state.claude_session.percent_text.replace(" 已用", "")
-        base = "🐾 --" if claude_text == "--" else f"🐾 {claude_text}"
+        base = "Claude --" if claude_text == "--" else f"Claude {claude_text}"
         if self.codex_5h_pct is None:
             return base
-        return f"{base} · 📜 {self.codex_5h_pct}%"
+        return f"{base} · Codex {self.codex_5h_pct}%"
 
 
 def run_app(mock: bool = False, interval: int = 60) -> None:
@@ -847,20 +873,20 @@ def _is_dark_appearance(view: NSView) -> bool:
 
 def _card_fill_color_for_view(view: NSView) -> NSColor:
     if _is_dark_appearance(view):
-        return NSColor.colorWithCalibratedRed_green_blue_alpha_(0.115, 0.126, 0.15, 0.92)
-    return NSColor.whiteColor().colorWithAlphaComponent_(0.9)
+        return NSColor.colorWithCalibratedRed_green_blue_alpha_(0.105, 0.112, 0.13, 0.96)
+    return NSColor.whiteColor().colorWithAlphaComponent_(0.96)
 
 
 def _card_border_color_for_view(view: NSView) -> NSColor:
     if _is_dark_appearance(view):
-        return NSColor.whiteColor().colorWithAlphaComponent_(0.08)
-    return NSColor.blackColor().colorWithAlphaComponent_(0.08)
+        return NSColor.whiteColor().colorWithAlphaComponent_(0.07)
+    return NSColor.blackColor().colorWithAlphaComponent_(0.06)
 
 
 def _card_separator_color_for_view(view: NSView) -> NSColor:
     if _is_dark_appearance(view):
-        return NSColor.whiteColor().colorWithAlphaComponent_(0.09)
-    return NSColor.blackColor().colorWithAlphaComponent_(0.08)
+        return NSColor.whiteColor().colorWithAlphaComponent_(0.07)
+    return NSColor.blackColor().colorWithAlphaComponent_(0.06)
 
 
 def _track_color_for_view(view: NSView) -> NSColor:
@@ -872,13 +898,13 @@ def _track_color_for_view(view: NSView) -> NSColor:
 def _background_gradient_for_view(view: NSView) -> NSGradient:
     if _is_dark_appearance(view):
         colors = [
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.1, 0.11, 0.135, 1.0),
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.065, 0.072, 0.09, 1.0),
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.075, 0.082, 0.096, 1.0),
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.058, 0.064, 0.078, 1.0),
         ]
     else:
         colors = [
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.96, 0.965, 0.975, 1.0),
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.92, 0.93, 0.945, 1.0),
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.975, 0.978, 0.982, 1.0),
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.952, 0.958, 0.965, 1.0),
         ]
     return NSGradient.alloc().initWithColors_(colors)
 
@@ -894,25 +920,42 @@ def _accent_gradient(color: NSColor) -> NSGradient:
 
 def _secondary_button_fill_color(view: NSView) -> NSColor:
     if _is_dark_appearance(view):
-        return NSColor.whiteColor().colorWithAlphaComponent_(0.045)
+        return NSColor.whiteColor().colorWithAlphaComponent_(0.055)
+    return NSColor.whiteColor().colorWithAlphaComponent_(0.86)
+
+
+def _disabled_button_fill_color(view: NSView) -> NSColor:
+    if _is_dark_appearance(view):
+        return NSColor.whiteColor().colorWithAlphaComponent_(0.035)
     return NSColor.blackColor().colorWithAlphaComponent_(0.035)
 
 
 def _button_gradient(color: NSColor) -> NSGradient:
     return NSGradient.alloc().initWithColors_(
         [
-            color.highlightWithLevel_(0.08),
-            color.shadowWithLevel_(0.12),
+            color.highlightWithLevel_(0.12),
+            color,
+        ],
+    )
+
+
+def _button_pressed_gradient(color: NSColor) -> NSGradient:
+    return NSGradient.alloc().initWithColors_(
+        [
+            color.shadowWithLevel_(0.16),
+            color.shadowWithLevel_(0.05),
         ],
     )
 
 
 def _button_border_color(view: NSView, primary: bool) -> NSColor:
+    if isinstance(view, NSButton) and not view.isEnabled():
+        return NSColor.blackColor().colorWithAlphaComponent_(0.04)
     if primary:
-        return NSColor.whiteColor().colorWithAlphaComponent_(0.14)
+        return NSColor.blackColor().colorWithAlphaComponent_(0.06)
     if _is_dark_appearance(view):
-        return NSColor.whiteColor().colorWithAlphaComponent_(0.12)
-    return NSColor.blackColor().colorWithAlphaComponent_(0.1)
+        return NSColor.whiteColor().colorWithAlphaComponent_(0.1)
+    return NSColor.blackColor().colorWithAlphaComponent_(0.09)
 
 
 def _icon_badge_fill(view: NSView) -> NSColor:
@@ -924,11 +967,12 @@ def _icon_badge_fill(view: NSView) -> NSColor:
 def _draw_button_title(button: ActionButton, bounds: Any) -> None:
     style = NSMutableParagraphStyle.alloc().init()
     style.setAlignment_(1)
-    text_color = (
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.18, 0.2, 0.96)
-        if button.is_primary
-        else NSColor.labelColor()
-    )
+    if not button.isEnabled():
+        text_color = _muted_label_color()
+    elif button.is_primary:
+        text_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.04, 0.09, 0.1, 0.98)
+    else:
+        text_color = NSColor.labelColor()
     attrs = {
         NSForegroundColorAttributeName: text_color,
         NSParagraphStyleAttributeName: style,
