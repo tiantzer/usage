@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import threading
@@ -52,6 +53,7 @@ from Foundation import (
 import claude_api_loader
 import codex_loader
 import line_quota
+import warmup
 from history_loader import load_entries
 from pricing import calculate_cost
 from usage_client import ClaudeUsageClient, PollOutcome, PollState
@@ -490,6 +492,9 @@ class AppDelegate(NSObject):
     force_line = objc.ivar()
     _refresh_in_flight = objc.ivar()
     refresh_started_at = objc.ivar()
+    warmup_config = objc.ivar()
+    _warmup_in_flight = objc.ivar()
+    _warmup_pending = objc.ivar()
 
     def initWithMock_interval_(self, mock: bool, interval: int) -> AppDelegate:
         self = objc.super(AppDelegate, self).init()
@@ -503,6 +508,9 @@ class AppDelegate(NSObject):
         self.force_line = False
         self._refresh_in_flight = False
         self.refresh_started_at = 0.0
+        self.warmup_config = warmup.load()
+        self._warmup_in_flight = False
+        self._warmup_pending = None
         self.rows = {}
         return self
 
@@ -516,6 +524,7 @@ class AppDelegate(NSObject):
         self.status_item.setMenu_(self.menu)
 
         self._refresh()
+        self._maybeWarmup()
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             self.interval,
             self,
@@ -562,6 +571,14 @@ class AppDelegate(NSObject):
         rows["status"] = _add_info_row(menu)
 
         menu.addItem_(NSMenuItem.separatorItem())
+        rows["warmup"] = ActionRowView.alloc().initWithTitle_target_action_(
+            "每日暖機",
+            self,
+            "toggleWarmup_",
+        )
+        _add_view_item(menu, rows["warmup"])
+
+        menu.addItem_(NSMenuItem.separatorItem())
         rows["refresh"] = ActionRowView.alloc().initWithTitle_target_action_(
             "立即更新",
             self,
@@ -584,10 +601,67 @@ class AppDelegate(NSObject):
 
     def timerFired_(self, timer: Any) -> None:
         self._refresh()
+        self._maybeWarmup()
 
     def refreshNow_(self, sender: Any) -> None:
         self.force_line = True
         self._refresh()
+
+    def toggleWarmup_(self, sender: Any) -> None:
+        if self._warmup_in_flight:
+            return
+        config = dataclasses.replace(self.warmup_config, enabled=not self.warmup_config.enabled)
+        warmup.save(config)
+        self.warmup_config = config
+        self._applyWarmupRow()
+        # 剛打開、而且今天早就過了排定時間，就當場補一次，不用等到明天
+        if config.enabled and warmup.should_run(config, time.time()):
+            self._startWarmup()
+
+    def warmupFinished_(self, sender: Any) -> None:
+        if self._warmup_pending is not None:
+            self.warmup_config = self._warmup_pending
+            self._warmup_pending = None
+        self._warmup_in_flight = False
+        self._applyWarmupRow()
+
+    @objc.python_method
+    def _maybeWarmup(self) -> None:
+        if self._warmup_in_flight:
+            return
+        if warmup.should_run(self.warmup_config, time.time()):
+            self._startWarmup()
+
+    @objc.python_method
+    def _startWarmup(self) -> None:
+        self._warmup_in_flight = True
+        self._applyWarmupRow()
+
+        def work() -> None:
+            config = warmup.run_once(self.warmup_config)
+            self._warmup_pending = config
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "warmupFinished:",
+                None,
+                False,
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _applyWarmupRow(self) -> None:
+        row = self.rows.get("warmup") if self.rows else None
+        if row is None:
+            return
+        if self._warmup_in_flight:
+            row.setTitleText_("每日暖機 · 暖機中…")
+            row.setMetaText_("")
+            row.setEnabledState_(False)
+            return
+        title, meta = warmup.row_texts(self.warmup_config, time.time())
+        row.setTitleText_(title)
+        row.setMetaText_(meta)
+        row.setEnabledState_(True)
 
     def quitApp_(self, sender: Any) -> None:
         if self.timer is not None:
@@ -657,6 +731,7 @@ class AppDelegate(NSObject):
         self.rows["today"].setText_(state.today_text)
         self.rows["status"].setText_(state.status_text)
         self.rows["refresh"].setMetaText_(format_updated_ago(state.updated_at))
+        self._applyWarmupRow()
 
     @objc.python_method
     def _setRefreshing(self, refreshing: bool) -> None:
