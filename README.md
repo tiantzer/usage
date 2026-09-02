@@ -10,7 +10,7 @@
 
 `usage` 是一個 macOS menu bar（螢幕右上角的選單列）小工具，把 **Claude Code 跟 Codex** 的用量同時釘在你的螢幕右上角。點開可以看到這 5 小時用了多少、這 7 天用了多少、今天總共花了幾塊美金。
 
-不呼叫 Anthropic / OpenAI 的 API（接口）、也不讀 Keychain（macOS 內建的密碼保險箱），所以不會發生「自己每分鐘 ping 一次也算用量」這種事。
+查用量本身不算用量：它讀的是 Claude 的「用量查詢」接口跟你本機的紀錄檔，不會送任何一句話給模型，所以不會發生「自己每分鐘 ping 一次也算用量」這種事。
 
 <p align="center">
   <img src="docs/popover.png" alt="usage popover 展開時的樣子" width="320">
@@ -18,27 +18,41 @@
 
 ## 它怎麼拿到你的用量數字
 
-usage **完全不連網路**。資料來源是 Claude Code 跟 Codex 在你本機留下的檔案。
+資料有兩個來源：Claude 官方的用量查詢接口（優先），以及 Claude Code / Codex 在你本機留下的檔案（備援）。
 
 ### Claude Code 用量
 
-usage 會幫你裝一個小腳本，這個小腳本叫做 **statusLine hook**（hook 就是「事件觸發點」，每次 Claude Code 刷新狀態列就會自動跑一次的小程式）。流程是這樣：
+**第一順位：官方用量接口。** usage 從 macOS Keychain（系統內建的密碼保險箱）唯讀取出 Claude Code 已經登入好的憑證，去問一次 `GET /api/oauth/usage`，一次拿齊三條線：
+
+| 顯示的那一列 | 對應的東西 |
+| --- | --- |
+| 5 小時限制 | 這 5 小時的用量 |
+| 每週 · 全部模型 | 這 7 天的總用量 |
+| 每週 · Fable 5 | Fable 5 自己那條週額度（只有這個接口拿得到） |
+
+這條路的好處是「Claude Code 沒開著也有數字」，而且是即時的。
+
+⚠️ usage **只讀 accessToken、絕不拿 refreshToken 去換新 token**。refresh token 是一次性輪替的，誰去刷新誰就把對方的憑證換掉；自己刷會害 Claude Code 被靜默登出。token 過期時 usage 就安靜退回備援來源，等 Claude Code 自己續期。
+
+不想讓它碰 Keychain / 連網的話，設環境變數 `USAG_CLAUDE_API=0` 就會只走下面的備援路線（那時 Fable 5 那列會顯示 `--`）。
+
+**第二順位（備援）：statusLine hook 寫的本機檔案。** 這個小腳本叫做 **statusLine hook**（hook 就是「事件觸發點」，每次 Claude Code 刷新狀態列就會自動跑一次的小程式）。流程是這樣：
 
 1. Claude Code 每次更新狀態列時，會把「這 5 小時用了百分之幾、這 7 天用了百分之幾」這類資訊整理成 JSON
 2. 透過標準輸入（stdin）餵給 hook
 3. hook 把 JSON 寫進 `~/.claude/usag-status.json` 這個檔
 4. usage 主程式去讀這個檔
 
-因為兩邊看的是同一份資料，**數字跟 Claude Code 自己看到的完全一樣**。
+因為兩邊看的是同一份資料，**數字跟 Claude Code 自己看到的完全一樣**；缺點是 Claude Code 沒開著就不會更新，而且這份檔案裡沒有 Fable 5 的週額度。
 
 ```mermaid
 flowchart LR
     A[Claude Code 主程式] -->|每次刷新狀態列<br/>把 JSON 透過 stdin 餵給 hook| B[usag-statusline.py<br/>hook 腳本]
     B -->|寫入| C[(~/.claude/<br/>usag-status.json)]
-    D[usage menu bar / TUI] -->|讀取| C
+    D[usage menu bar / TUI] -->|備援：讀檔| C
+    K[(Keychain<br/>Claude Code 憑證)] -->|唯讀 accessToken| D
+    D -->|優先：GET /api/oauth/usage| F((Anthropic<br/>用量接口))
     D -->|顯示| E[macOS menu bar]
-    F((Anthropic API)) -.x.- D
-    style F stroke:#c0392b,stroke-dasharray:5 5
 ```
 
 讀檔的優先順序：
@@ -194,7 +208,7 @@ USAG_DEBUG=1 python3 main.py
 
 ## 一些行為說明
 
-- usage 只讀 `~/.claude/usag-status.json` 跟 `~/.claude/tt-status.json`（還有 Codex 那邊的 session 檔）。**完全不連網路、也不讀 Keychain**。
+- usage 會讀 Claude 的用量接口（憑證從 Keychain 唯讀取用）、`~/.claude/usag-status.json`、`~/.claude/tt-status.json`，還有 Codex 那邊的 session 檔。想關掉接口跟 Keychain 存取就設 `USAG_CLAUDE_API=0`。
 - Claude Code 沒在跑的時候，狀態檔不會更新；但因為實際用量也不會變（除非重置時間到了），所以顯示的數字仍然是有效的；重置時間過了會自動歸零。
 - 如果狀態檔超過 6 小時沒被更新過，會在狀態訊息標註「狀態檔已 N 分鐘未更新，數字可能過時」。
 

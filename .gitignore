@@ -12,3 +12,7 @@ build/
 dist/
 *.egg-info/
 .pytest_cache/
+
+# 本機備份檔
+*.bak.*
+*.app.bak.*/

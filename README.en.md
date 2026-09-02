@@ -10,7 +10,7 @@
 
 `usage` is a macOS menu bar tool that pins your **Claude Code and Codex** usage to the top-right of your screen. Click the icon for a popover showing the current 5-hour usage, the current 7-day usage, and today's total spend.
 
-It **never calls the Anthropic / OpenAI API** and **never reads the Keychain**, so it avoids the observer effect of "pinging once a minute counts as usage."
+Checking usage never costs usage: it reads Claude's usage-lookup endpoint plus local files, and never sends a prompt to a model — so it avoids the observer effect of "pinging once a minute counts as usage."
 
 <p align="center">
   <img src="docs/popover.png" alt="usage popover" width="320">
@@ -18,27 +18,41 @@ It **never calls the Anthropic / OpenAI API** and **never reads the Keychain**, 
 
 ## How it gets the data
 
-usage **never makes network calls**. All numbers come from local files written by Claude Code and Codex themselves.
+Numbers come from two places: Claude's official usage endpoint (preferred), and local files written by Claude Code and Codex themselves (fallback).
 
 ### Claude Code usage
 
-usage installs a small **statusLine hook** — a script that Claude Code automatically pipes data into every time it refreshes its status line. The flow:
+**First choice: the official usage endpoint.** usage reads the credentials Claude Code already stored in the macOS Keychain (read-only) and calls `GET /api/oauth/usage` once, which returns three lines at once:
+
+| Row shown | What it is |
+| --- | --- |
+| 5-hour limit | Usage in the current 5-hour window |
+| Weekly · all models | Usage across the current 7 days |
+| Weekly · Fable 5 | Fable 5's own weekly allowance (only this endpoint exposes it) |
+
+The upside: numbers stay live even when Claude Code isn't running.
+
+⚠️ usage **only reads the accessToken and never exchanges the refreshToken**. Refresh tokens rotate on use, so whoever refreshes replaces the other side's credentials — refreshing here would silently log Claude Code out. When the token expires, usage quietly falls back to the local file and lets Claude Code renew it.
+
+Set `USAG_CLAUDE_API=0` if you want it to skip the Keychain and the network entirely (the Fable 5 row then shows `--`).
+
+**Second choice (fallback): the statusLine hook file.** usage installs a small **statusLine hook** — a script that Claude Code automatically pipes data into every time it refreshes its status line. The flow:
 
 1. Claude Code refreshes the status line and packages usage info (5-hour percentage, 7-day percentage, etc.) as JSON.
 2. It pipes that JSON to the hook via stdin.
 3. The hook writes the JSON to `~/.claude/usag-status.json`.
 4. The usage UI reads that file.
 
-Since both sides look at the same source data, **the numbers match exactly what Claude Code itself shows**.
+Since both sides look at the same source data, **the numbers match exactly what Claude Code itself shows** — but this file only updates while Claude Code is running, and it carries no Fable 5 weekly allowance.
 
 ```mermaid
 flowchart LR
     A[Claude Code main process] -->|pipes JSON to stdin<br/>on every statusLine refresh| B[usag-statusline.py<br/>hook script]
     B -->|writes| C[(~/.claude/<br/>usag-status.json)]
-    D[usage menu bar / TUI] -->|reads| C
+    D[usage menu bar / TUI] -->|fallback: reads| C
+    K[(Keychain<br/>Claude Code credentials)] -->|read-only accessToken| D
+    D -->|preferred: GET /api/oauth/usage| F((Anthropic<br/>usage endpoint))
     D -->|renders| E[macOS menu bar]
-    F((Anthropic API)) -.x.- D
-    style F stroke:#c0392b,stroke-dasharray:5 5
 ```
 
 Read priority:
@@ -192,7 +206,7 @@ USAG_DEBUG=1 python3 main.py
 
 ## Behaviour notes
 
-- usage only reads `~/.claude/usag-status.json`, `~/.claude/tt-status.json`, and Codex's session files. It does not make network calls and does not read the Keychain.
+- usage reads Claude's usage endpoint (read-only Keychain token), `~/.claude/usag-status.json`, `~/.claude/tt-status.json`, and Codex's session files. Set `USAG_CLAUDE_API=0` to disable the endpoint and Keychain access.
 - When Claude Code isn't running, the status file isn't updated — but actual usage isn't changing either (until reset time), so the displayed value is still accurate. After reset time passes, it auto-resets to zero.
 - If the status file hasn't been updated for more than 6 hours, the status line notes "status file is N minutes stale, numbers may be out of date."
 
