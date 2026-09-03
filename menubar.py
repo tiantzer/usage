@@ -509,6 +509,10 @@ class AppDelegate(NSObject):
         self._refresh_in_flight = False
         self.refresh_started_at = 0.0
         self.warmup_config = warmup.load()
+        warmup.log(
+            f"app 啟動：enabled={self.warmup_config.enabled} "
+            f"time={self.warmup_config.time} last_run_date={self.warmup_config.last_run_date}",
+        )
         self._warmup_in_flight = False
         self._warmup_pending = None
         self.rows = {}
@@ -628,6 +632,8 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _maybeWarmup(self) -> None:
         if self._warmup_in_flight:
+            if warmup.should_run(self.warmup_config, time.time()):
+                warmup.log("該暖機了，但上一次還卡在執行中，跳過")
             return
         if warmup.should_run(self.warmup_config, time.time()):
             self._startWarmup()
@@ -638,13 +644,16 @@ class AppDelegate(NSObject):
         self._applyWarmupRow()
 
         def work() -> None:
-            config = warmup.run_once(self.warmup_config)
-            self._warmup_pending = config
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "warmupFinished:",
-                None,
-                False,
-            )
+            try:
+                self._warmup_pending = warmup.run_once(self.warmup_config)
+            except BaseException:  # noqa: BLE001 這裡漏接會讓暖機從此不再啟動
+                warmup.log_exception("背景暖機執行緒炸掉")
+            finally:
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "warmupFinished:",
+                    None,
+                    False,
+                )
 
         threading.Thread(target=work, daemon=True).start()
 

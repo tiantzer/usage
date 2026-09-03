@@ -17,12 +17,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+import traceback
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(os.path.expanduser("~/.claude/usag_warmup.json"))
+LOG_PATH = Path(os.path.expanduser("~/Library/Logs/usag/warmup.log"))
 
 DEFAULT_TIME = "07:30"
 DEFAULT_MODEL = "haiku"
@@ -31,6 +33,21 @@ RUN_TIMEOUT_SECONDS = 180.0
 # 錯過排定時間太久就不補跑了（例如電腦整天沒開，晚上才喚醒）。
 # 補跑窗口設 6 小時：07:30 排程最晚 13:30 前喚醒都還補得到。
 CATCHUP_WINDOW_SECONDS = 6 * 3600
+
+
+def log(message: str) -> None:
+    """暖機自己留一份 log。app 是 GUI 啟動的、stderr 沒地方去，出事會完全沒線索。"""
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with LOG_PATH.open("a", encoding="utf-8") as file:
+            file.write(f"{stamp} {message}\n")
+    except OSError:
+        pass
+
+
+def log_exception(prefix: str) -> None:
+    log(f"{prefix}\n{traceback.format_exc().rstrip()}")
 
 
 @dataclass(frozen=True)
@@ -95,6 +112,7 @@ def save(config: WarmupConfig) -> None:
         os.replace(tmp, CONFIG_PATH)
     except OSError:
         LOGGER.warning("warmup config 寫不進去：%s", CONFIG_PATH)
+        log_exception(f"寫不進 config：{CONFIG_PATH}")
 
 
 def find_claude_binary(configured: str = "") -> str:
@@ -147,9 +165,11 @@ def should_run(config: WarmupConfig, now: float) -> bool:
 def run_once(config: WarmupConfig) -> WarmupConfig:
     """真的送一句 hi 出去。回傳更新過（且已存檔）的設定。"""
     now = _dt.datetime.now()
+    log(f"run_once 開始（model={config.model or DEFAULT_MODEL}）")
     binary = find_claude_binary(config.claude_bin)
     if not binary:
         result = "找不到 claude 指令"
+        log("找不到 claude 指令")
     else:
         env = {
             k: v
@@ -176,26 +196,38 @@ def run_once(config: WarmupConfig) -> WarmupConfig:
                     cwd=workdir,
                     env=env,
                     capture_output=True,
-                    text=True,
+                    # 不能用 text=True：打包成 .app 之後 Python 的 locale 編碼是 ascii，
+                    # claude 回中文就會 UnicodeDecodeError（暖機因此整個失效）。
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=RUN_TIMEOUT_SECONDS,
                     check=False,
                 )
             result = "成功" if proc.returncode == 0 else f"失敗（exit {proc.returncode}）"
+            log(f"claude 結束 exit={proc.returncode}")
             if proc.returncode != 0:
                 LOGGER.warning("warmup 失敗：%s", (proc.stderr or "")[:400])
+                log(f"stderr：{(proc.stderr or '')[:400]}")
         except subprocess.TimeoutExpired:
             result = "逾時"
-        except OSError as exc:
+            log("claude 逾時")
+        except Exception as exc:  # noqa: BLE001 背景執行緒吞掉例外會讓狀態永遠卡住
             result = f"錯誤：{exc.__class__.__name__}"
+            log_exception("claude 執行時例外")
 
-    updated = replace(
-        config,
-        claude_bin=binary or config.claude_bin,
-        last_run_date=now.strftime("%Y-%m-%d") if result == "成功" else config.last_run_date,
-        last_run_at=now.timestamp(),
-        last_result=result,
-    )
-    save(updated)
+    try:
+        updated = replace(
+            config,
+            claude_bin=binary or config.claude_bin,
+            last_run_date=now.strftime("%Y-%m-%d") if result == "成功" else config.last_run_date,
+            last_run_at=now.timestamp(),
+            last_result=result,
+        )
+        save(updated)
+    except Exception:  # noqa: BLE001 回寫失敗也要留下線索，不能靜靜地什麼都沒發生
+        log_exception("回寫 config 時例外")
+        raise
+    log(f"回寫完成：last_run_date={updated.last_run_date} result={result}")
     return updated
 
 
