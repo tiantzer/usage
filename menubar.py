@@ -72,6 +72,8 @@ ACTION_ROW_HEIGHT = 26.0
 WARN_PERCENT = 80.0
 DANGER_PERCENT = 95.0
 
+LINE_ROW_TITLES = {line_quota.BOT_NOTICE: "Notice Bot", line_quota.BOT_DEV: "CEREAL DEV"}
+
 STATUS_FILE = os.path.expanduser("~/.claude/usag-status.json")
 
 
@@ -107,6 +109,7 @@ class MenuState:
     codex_session: QuotaRowState
     codex_weekly: QuotaRowState
     line_month: QuotaRowState
+    line_dev_month: QuotaRowState
     version_text: str
     today_text: str
     status_text: str
@@ -562,13 +565,14 @@ class AppDelegate(NSObject):
         rows["codex_weekly"] = _add_quota_row(menu)
 
         menu.addItem_(NSMenuItem.separatorItem())
-        line_header = MenuHeaderView.alloc().initWithTitle_iconPath_("LINE Notice Bot", "")
+        line_header = MenuHeaderView.alloc().initWithTitle_iconPath_("LINE 本月配額", "")
         line_header.setDotColor_(
             NSColor.colorWithCalibratedRed_green_blue_alpha_(0.02, 0.78, 0.33, 1.0),
         )
         _add_view_item(menu, line_header)
         rows["line_header"] = line_header
         rows["line_month"] = _add_quota_row(menu)
+        rows["line_dev_month"] = _add_quota_row(menu)
 
         menu.addItem_(NSMenuItem.separatorItem())
         rows["today"] = _add_info_row(menu)
@@ -693,8 +697,11 @@ class AppDelegate(NSObject):
         try:
             outcome = asyncio.run(self._fetch())
             codex_rows, codex_5h_pct = self._codex_rows()
-            line_row = self._line_row(force=force_line)
-            state = self._state_from_outcome(outcome, codex_rows, line_row)
+            line_rows = (
+                self._line_row(line_quota.BOT_NOTICE, force=force_line),
+                self._line_row(line_quota.BOT_DEV, force=force_line),
+            )
+            state = self._state_from_outcome(outcome, codex_rows, line_rows)
         except Exception as exc:
             codex_5h_pct = None
             state = _error_state(type(exc).__name__, self.mock)
@@ -737,6 +744,7 @@ class AppDelegate(NSObject):
         self.rows["codex_session"].setRowState_(state.codex_session)
         self.rows["codex_weekly"].setRowState_(state.codex_weekly)
         self.rows["line_month"].setRowState_(state.line_month)
+        self.rows["line_dev_month"].setRowState_(state.line_dev_month)
         self.rows["today"].setText_(state.today_text)
         self.rows["status"].setText_(state.status_text)
         self.rows["refresh"].setMetaText_(format_updated_ago(state.updated_at))
@@ -767,7 +775,7 @@ class AppDelegate(NSObject):
         self,
         outcome: PollOutcome,
         codex_rows: tuple[QuotaRowState, QuotaRowState],
-        line_row: QuotaRowState,
+        line_rows: tuple[QuotaRowState, QuotaRowState],
     ) -> MenuState:
         now = time.time()
         group_name = GROUP_NAMES[self.tracker.group()]
@@ -825,7 +833,8 @@ class AppDelegate(NSObject):
             claude_fable=claude_fable,
             codex_session=codex_rows[0],
             codex_weekly=codex_rows[1],
-            line_month=line_row,
+            line_month=line_rows[0],
+            line_dev_month=line_rows[1],
             version_text=_claude_code_version(self.mock),
             today_text=_today_text(self.mock),
             status_text=f"速率 {group_name} · {status_note}",
@@ -877,18 +886,19 @@ class AppDelegate(NSObject):
         return rows, codex_5h_pct
 
     @objc.python_method
-    def _line_row(self, *, force: bool = False) -> QuotaRowState:
+    def _line_row(self, bot: str, *, force: bool = False) -> QuotaRowState:
+        title = LINE_ROW_TITLES[bot]
         try:
-            result = line_quota.fetch(mock=bool(self.mock), force=force)
+            result = line_quota.fetch(bot, mock=bool(self.mock), force=force)
         except Exception as exc:  # 網路層以外的意外，不能拖垮整個刷新
-            return QuotaRowState("本月配額", None, f"-- · {type(exc).__name__}", available=False)
+            return QuotaRowState(title, None, f"-- · {type(exc).__name__}", available=False)
 
         if not result.available:
-            return QuotaRowState("本月配額", None, f"-- · {result.message}", available=False)
+            return QuotaRowState(title, None, f"-- · {result.message}", available=False)
 
         if result.limit is None:
             return QuotaRowState(
-                "本月配額",
+                title,
                 None,
                 f"已發 {result.used:,} 則 · 無上限",
                 available=False,
@@ -898,7 +908,7 @@ class AppDelegate(NSObject):
         percent = result.percent or 0.0
         head = "已用滿" if percent >= 100 else f"{_format_percent(percent)}%"
         return QuotaRowState(
-            "本月配額",
+            title,
             percent,
             f"{result.used:,}/{result.limit:,} · {head} · {remaining} 後重置",
             available=True,
@@ -956,7 +966,8 @@ def _empty_state() -> MenuState:
         claude_fable=_missing_row("每週 · Fable 5"),
         codex_session=_missing_row("5 小時限制"),
         codex_weekly=_missing_row("每週 · 7 天"),
-        line_month=_missing_row("本月配額"),
+        line_month=_missing_row(LINE_ROW_TITLES[line_quota.BOT_NOTICE]),
+        line_dev_month=_missing_row(LINE_ROW_TITLES[line_quota.BOT_DEV]),
         version_text="",
         today_text="今日 $0.00 · 0 tokens",
         status_text="載入中…",
