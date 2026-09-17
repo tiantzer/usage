@@ -8,6 +8,7 @@ Token 不寫進原始碼，依序從以下來源找（找到就用）：
   1. 環境變數 NOTICE_LINE_CHANNEL_ACCESS_TOKEN
   2. ~/.secrets/usage.env 內的 NOTICE_LINE_CHANNEL_ACCESS_TOKEN=...
   3. ~/.secrets/credentials.md 內的 NOTICE_LINE_CHANNEL_ACCESS_TOKEN="..."
+  4. ~/.secrets/credentials-notes.md 內同上寫法（2026-09-10 瘦身後實際位置）
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ CONSUMPTION_URL = "https://api.line.me/v2/bot/message/quota/consumption"
 TOKEN_ENV = "NOTICE_LINE_CHANNEL_ACCESS_TOKEN"
 ENV_FILE = Path(os.path.expanduser("~/.secrets/usage.env"))
 CREDENTIALS_FILE = Path(os.path.expanduser("~/.secrets/credentials.md"))
+# 2026-09-10 憑證檔瘦身後，Notice token 落在 notes 檔（仍是 KEY=... 舊格式）
+CREDENTIALS_NOTES_FILE = Path(os.path.expanduser("~/.secrets/credentials-notes.md"))
 
 CACHE_TTL_SECONDS = 600.0
 REQUEST_TIMEOUT = 6.0
@@ -60,7 +63,8 @@ def _token_from_credentials(path: Path) -> str | None:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    match = re.search(rf'{TOKEN_ENV}="([^"]+)"', text)
+    # 容許 KEY="..."、KEY=...、KEY=`...` 三種寫法；LINE long-lived token 約 172 字元
+    match = re.search(rf'{TOKEN_ENV}\s*=\s*["\'`]?([A-Za-z0-9+/=]{{100,}})', text)
     return match.group(1).strip() if match else None
 
 
@@ -68,7 +72,11 @@ def load_token() -> str | None:
     token = os.environ.get(TOKEN_ENV)
     if token and token.strip():
         return token.strip()
-    return _token_from_env_file(ENV_FILE) or _token_from_credentials(CREDENTIALS_FILE)
+    return (
+        _token_from_env_file(ENV_FILE)
+        or _token_from_credentials(CREDENTIALS_FILE)
+        or _token_from_credentials(CREDENTIALS_NOTES_FILE)
+    )
 
 
 def _get_json(url: str, token: str) -> dict:
