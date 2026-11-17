@@ -34,7 +34,11 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 # 想完全不碰 Keychain / 不連 API，設 USAG_CLAUDE_API=0（會退回只讀本地 status 檔）
 ENABLE_ENV = "USAG_CLAUDE_API"
 
-CACHE_TTL_SECONDS = 45.0
+CACHE_TTL_SECONDS = 120.0
+# 按「立即更新」也至少隔這麼久才真的再打一次，避免被 429
+FORCE_MIN_INTERVAL_SECONDS = 20.0
+# API 暫時失敗（429／斷網）時，這段時間內沿用上一次成功的數字
+STALE_OK_SECONDS = 30 * 60.0
 REQUEST_TIMEOUT = 6.0
 
 # 名稱可能回 "Fable" 或 "Fable 5"，一律用小寫前綴比對
@@ -183,6 +187,14 @@ def is_enabled() -> bool:
     return os.environ.get(ENABLE_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _stale_cache() -> ClaudeApiUsage | None:
+    """這次抓不到時，回傳還不算太舊的上一次成功結果。"""
+    with _lock:
+        if _cache is not None and (time.time() - _cache[0]) < STALE_OK_SECONDS:
+            return _cache[1]
+    return None
+
+
 def fetch(*, mock: bool = False, force: bool = False) -> ClaudeApiUsage | None:
     """回傳最新用量；抓不到（關閉 / 沒 token / token 過期 / 網路錯）一律回 None。"""
     if mock:
@@ -194,12 +206,14 @@ def fetch(*, mock: bool = False, force: bool = False) -> ClaudeApiUsage | None:
     global _cache
     now = time.time()
     with _lock:
-        if not force and _cache is not None and (now - _cache[0]) < CACHE_TTL_SECONDS:
-            return _cache[1]
+        if _cache is not None:
+            age = now - _cache[0]
+            if age < (FORCE_MIN_INTERVAL_SECONDS if force else CACHE_TTL_SECONDS):
+                return _cache[1]
 
     token = _access_token()
     if token is None:
-        return None
+        return _stale_cache()
 
     request = urllib.request.Request(
         USAGE_URL,
@@ -214,10 +228,10 @@ def fetch(*, mock: bool = False, force: bool = False) -> ClaudeApiUsage | None:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
-        return None
+        return _stale_cache()
 
     if not isinstance(payload, dict):
-        return None
+        return _stale_cache()
 
     usage = _parse(payload)
     if usage.five_hour is None and usage.seven_day is None and not usage.weekly_scoped:

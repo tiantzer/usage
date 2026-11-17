@@ -31,6 +31,8 @@ class UsageSnapshot:
     weekly_reset_at: float
     current_status: str
     polled_at: float
+    # 方案沒有 5 小時限制（例如 Ultra）時，狀態檔不會有 five_hour 區塊
+    has_session_limit: bool = True
 
 
 @dataclass(slots=True)
@@ -108,6 +110,7 @@ def _build_snapshot(data: dict[str, Any]) -> UsageSnapshot | None:
         weekly_reset_at=seven_reset,
         current_status=status,
         polled_at=polled_at,
+        has_session_limit=five_pct_raw is not None,
     )
 
 

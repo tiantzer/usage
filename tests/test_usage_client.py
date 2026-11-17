@@ -97,3 +97,14 @@ def test_fetch_once_without_status_file_returns_non_success(
 
     assert outcome.state is not usage_client.PollState.SUCCESS
     assert outcome.state is usage_client.PollState.TOKEN_ERROR
+
+
+def test_snapshot_without_five_hour_block_means_no_session_limit() -> None:
+    from usage_client import _build_snapshot
+
+    snapshot = _build_snapshot(
+        {"rate_limits": {"seven_day": {"used_percentage": 37, "resets_at": 4102444800}}}
+    )
+    assert snapshot is not None
+    assert snapshot.has_session_limit is False
+    assert snapshot.weekly_percent == 37

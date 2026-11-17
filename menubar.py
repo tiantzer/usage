@@ -372,6 +372,7 @@ class ActionRowView(NSView):
     action_name = objc.ivar()
     hovering = objc.ivar()
     enabled = objc.ivar()
+    keep_menu_open = objc.ivar()
 
     def initWithTitle_target_action_(self, title: str, target: Any, action: str) -> ActionRowView:
         self = objc.super(ActionRowView, self).initWithFrame_(
@@ -383,6 +384,7 @@ class ActionRowView(NSView):
         self.action_name = action
         self.hovering = False
         self.enabled = True
+        self.keep_menu_open = False
         self.title_label = _label(title, NSFont.systemFontOfSize_weight_(13, 0.0), _label_color())
         self.meta_label = _label(
             "",
@@ -435,12 +437,13 @@ class ActionRowView(NSView):
     def mouseUp_(self, event: Any) -> None:
         if not self.enabled:
             return
-        self.hovering = False
-        self._applyColors()
-        item = self.enclosingMenuItem()
-        menu = item.menu() if item is not None else None
-        if menu is not None:
-            menu.cancelTracking()
+        if not self.keep_menu_open:
+            self.hovering = False
+            self._applyColors()
+            item = self.enclosingMenuItem()
+            menu = item.menu() if item is not None else None
+            if menu is not None:
+                menu.cancelTracking()
         if self.target is not None and self.action_name:
             handler = getattr(self.target, self.action_name, None)
             if handler is not None:
@@ -592,6 +595,7 @@ class AppDelegate(NSObject):
             self,
             "refreshNow_",
         )
+        rows["refresh"].keep_menu_open = True
         _add_view_item(menu, rows["refresh"])
         rows["quit"] = ActionRowView.alloc().initWithTitle_target_action_(
             "結束",
@@ -794,11 +798,10 @@ class AppDelegate(NSObject):
         if api_usage is not None and (api_usage.five_hour or api_usage.seven_day):
             five = api_usage.five_hour
             weekly = api_usage.seven_day
-            claude_session = _quota_row(
-                "5 小時限制",
-                five.percent if five else None,
-                five.resets_at if five else None,
-                now,
+            claude_session = (
+                _quota_row("5 小時限制", five.percent, five.resets_at, now)
+                if five
+                else _unlimited_row("5 小時限制")
             )
             claude_weekly = _quota_row(
                 "每週 · 全部模型",
@@ -809,11 +812,15 @@ class AppDelegate(NSObject):
             status_note = "✓ 已同步（API）"
         elif outcome.state == PollState.SUCCESS and outcome.snapshot is not None:
             snapshot = outcome.snapshot
-            claude_session = _quota_row(
-                "5 小時限制",
-                float(snapshot.current_percent),
-                snapshot.current_reset_at,
-                now,
+            claude_session = (
+                _quota_row(
+                    "5 小時限制",
+                    float(snapshot.current_percent),
+                    snapshot.current_reset_at,
+                    now,
+                )
+                if snapshot.has_session_limit
+                else _unlimited_row("5 小時限制")
             )
             claude_weekly = _quota_row(
                 "每週 · 全部模型",
@@ -917,7 +924,14 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _compose_title(self, state: MenuState) -> str:
         claude_pct = state.claude_session.percent
-        base = "Claude --" if claude_pct is None else f"Claude {_format_percent(claude_pct)}%"
+        weekly_pct = state.claude_weekly.percent
+        if claude_pct is not None:
+            base = f"Claude {_format_percent(claude_pct)}%"
+        elif weekly_pct is not None:
+            # 沒有 5 小時限制的方案：選單列改顯示每週用量
+            base = f"Claude 週 {_format_percent(weekly_pct)}%"
+        else:
+            base = "Claude --"
         if self.codex_5h_pct is None:
             return base
         return f"{base} · Codex {self.codex_5h_pct}%"
@@ -996,6 +1010,10 @@ def _quota_row(
         meta_text=f"{_format_percent(pct)}% · {format_human_time(resets_at - now)} 後重置",
         available=True,
     )
+
+
+def _unlimited_row(title: str) -> QuotaRowState:
+    return QuotaRowState(title=title, percent=None, meta_text="無限制", available=False)
 
 
 def _missing_row(title: str) -> QuotaRowState:
